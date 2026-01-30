@@ -7,7 +7,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
-import android.media.Image
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Build
@@ -15,7 +14,6 @@ import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -26,13 +24,10 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
+import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.exceptions.CameraNotAvailableException
-import com.google.ar.core.exceptions.NotYetAvailableException
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.label.ImageLabeling
-import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -49,28 +44,26 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var isDepthSupported = false
     private val backgroundRenderer = SimpleBackgroundRenderer()
 
-    // ML Kit Labeler
-    private val labeler = ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS)
-    private var lastLabelingTime = 0L
-    private val LABELING_INTERVAL_MS = 1000L // Run ML only once per second max
-    private var currentObjectLabel = ""
-
-    // Display metrics
+    // Display metrics for ARCore
     private var viewportWidth = 0
     private var viewportHeight = 0
 
-    // --- DETECTION REGION (ROI) ---
-    private val ROI_LEFT = 0.10f
-    private val ROI_RIGHT = 0.90f
-    private val ROI_TOP = 0.20f
-    private val ROI_BOTTOM = 0.80f
+    // --- FINE TUNING: DETECTION REGION (0.0 to 1.0) ---
+    // Change these values to adjust both the visual box and the detection logic simultaneously.
+    private val ROI_LEFT = 0.15f   // Left edge at 25% screen width
+    private val ROI_RIGHT = 0.85f  // Right edge at 75% screen width
+    private val ROI_TOP = 0.25f    // Top edge at 35% screen height
+    private val ROI_BOTTOM = 0.80f // Bottom edge at 90% screen height (leaving 10% for feet)
+
+    // Drop-off detection (ground too far) only makes sense for the floor,
+    // so we only trigger it in the lower portion of the ROI.
     private val ROI_DROP_START = 0.60f
 
     // Safety Thresholds
-    private val OBSTACLE_LIMIT_MM = 1200
-    private val DROP_OFF_LIMIT_MM = 4000
+    private val OBSTACLE_LIMIT_MM = 1200 // Alert if object is within 1.2 meters
+    private val DROP_OFF_LIMIT_MM = 2500 // Alert if ground is deeper than 2.5 meters (Roof Edge/Stairs)
 
-    private val VIBRATION_INTERVAL = 500L
+    private val VIBRATION_INTERVAL = 500L // Don't vibrate constantly
     private var lastVibrationTime = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +74,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         warningText = findViewById(R.id.warningText)
         statusText = findViewById(R.id.statusText)
 
+        // Setup OpenGL Renderer for ARCore
         surfaceView.preserveEGLContextOnPause = true
         surfaceView.setEGLContextClientVersion(2)
         surfaceView.setEGLConfigChooser(8, 8, 8, 8, 16, 0)
@@ -88,6 +82,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         surfaceView.setWillNotDraw(false)
 
+        // Add the visual overlay for the observed area
         val overlayView = OverlayView(this)
         addContentView(overlayView, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -113,12 +108,14 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 }
                 session = Session(this)
                 val config = session!!.config
+
+                // IMPORTANT: Enable Depth API
                 if (session!!.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
                     config.depthMode = Config.DepthMode.AUTOMATIC
                     isDepthSupported = true
-                    statusText.text = "Depth Active"
+                    statusText.text = "eyebro: Depth Active"
                 } else {
-                    statusText.text = "Depth Not Supported"
+                    statusText.text = "eyebro: Depth Not Supported"
                 }
                 session!!.configure(config)
             } catch (e: Exception) {
@@ -141,10 +138,12 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         session?.pause()
     }
 
-    // --- RENDERER CALLBACKS ---
+    // --- AR CORE LOGIC LOOP ---
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
+
+        // Prepare the background renderer (compile shaders, gen texture)
         backgroundRenderer.createOnGlThread()
     }
 
@@ -152,29 +151,35 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         viewportWidth = width
         viewportHeight = height
         GLES20.glViewport(0, 0, width, height)
+        // Notify ARCore session of the display geometry so it can calculate UVs correctly
         session?.setDisplayGeometry(windowManager.defaultDisplay.rotation, width, height)
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        // Clear screen
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
 
         val currentSession = session ?: return
 
         try {
+            // Bind the texture ID to the session so it knows where to push the camera feed
             currentSession.setCameraTextureName(backgroundRenderer.textureId)
+
+            // Update session (this updates the texture with new camera frame)
             val frame = currentSession.update()
+
+            // Draw the camera background
             backgroundRenderer.draw(frame)
 
+            // Run existing Depth Logic
             if (isDepthSupported) {
                 processDepth(frame)
             }
 
         } catch (t: Throwable) {
-            // Avoid crashing on session errors
+            // Handle errors
         }
     }
-
-    // --- CORE LOGIC ---
 
     private fun processDepth(frame: Frame) {
         try {
@@ -187,26 +192,34 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val buffer = depthImage.planes[0].buffer.order(ByteOrder.nativeOrder())
             val width = depthImage.width
             val height = depthImage.height
-            val step = 6
+            val step = 6 // Higher step for better performance scanning
 
+            // Calculate active pixel area using the ROI constants
             val startX = (width * ROI_LEFT).toInt()
             val endX = (width * ROI_RIGHT).toInt()
             val startY = (height * ROI_TOP).toInt()
             val endY = (height * ROI_BOTTOM).toInt()
+
+            // Calculate where the "Drop-off" logic starts (lower part of screen)
             val dropStartY = (height * ROI_DROP_START).toInt()
 
             var closePixels = 0
             var deepPixels = 0
 
+            // Single loop scanning the unified Region of Interest
             for (y in startY until endY step step) {
                 for (x in startX until endX step step) {
                     val index = (y * depthImage.planes[0].rowStride) + (x * depthImage.planes[0].pixelStride)
                     val distanceMm = getDistanceAt(buffer, index)
 
+                    // 1. Obstacle Check (Applies to the whole ROI)
+                    // If distance is valid (>0) and too close (< LIMIT)
                     if (distanceMm in 1 until OBSTACLE_LIMIT_MM) {
                         closePixels++
                     }
 
+                    // 2. Drop-off Check (Applies only to the lower portion of ROI)
+                    // If we are looking at the floor (y > dropStartY) and it suddenly gets deep
                     if (y >= dropStartY) {
                         if (distanceMm > DROP_OFF_LIMIT_MM) {
                             deepPixels++
@@ -217,6 +230,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
             depthImage.close()
 
+            // Calculate pixel counts to determine thresholds
             val roiWidthPixels = (endX - startX) / step
             val roiHeightPixels = (endY - startY) / step
             val dropHeightPixels = (endY - dropStartY) / step
@@ -224,77 +238,22 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val totalPixels = roiWidthPixels * roiHeightPixels
             val totalDropPixels = roiWidthPixels * dropHeightPixels
 
-            val obsThreshold = totalPixels * 0.15
-            val dropThreshold = totalDropPixels * 0.25
-
-            // --- OBSTACLE IDENTIFICATION TRIGGER ---
-            // Only run ML if we actually see an obstacle, to save battery/perf
-            if (closePixels > obsThreshold) {
-                val currentTime = System.currentTimeMillis()
-                if (currentTime - lastLabelingTime > LABELING_INTERVAL_MS) {
-                    lastLabelingTime = currentTime
-                    identifyObstacle(frame)
-                }
-            } else {
-                // Reset label if path is clear
-                if (System.currentTimeMillis() - lastLabelingTime > 2000) {
-                    currentObjectLabel = ""
-                }
-            }
+            // Trigger thresholds (percentages of the scanned area)
+            val obsThreshold = totalPixels * 0.15 // 15% of box is blocked
+            val dropThreshold = totalDropPixels * 0.25 // 25% of floor area is deep
 
             runOnUiThread {
                 if (deepPixels > dropThreshold) {
                     triggerObstacleWarning("EDGE DETECTED!", Color.RED)
                 } else if (closePixels > obsThreshold) {
-                    val msg = if (currentObjectLabel.isNotEmpty()) "STOP! ($currentObjectLabel)" else "STOP!"
-                    triggerObstacleWarning(msg, Color.parseColor("#FFA500"))
+                    triggerObstacleWarning("STOP!", Color.parseColor("#FFA500")) // Orange
                 } else {
                     clearWarning()
                 }
             }
 
         } catch (e: Exception) {
-            // Depth not available
-        }
-    }
-
-    /**
-     * Uses ML Kit to identify what is in the camera frame.
-     * Note: Requires 'com.google.mlkit:image-labeling' dependency.
-     */
-    private fun identifyObstacle(frame: Frame) {
-        try {
-            // Acquire the high-quality RGB camera image
-            val cameraImage = frame.acquireCameraImage()
-
-            // Note: rotationDegrees usually 90 for portrait on most phones
-            val rotationDegrees = 90
-            val inputImage = InputImage.fromMediaImage(cameraImage, rotationDegrees)
-
-            labeler.process(inputImage)
-                .addOnSuccessListener { labels ->
-                    // Get the most confident label
-                    if (labels.isNotEmpty()) {
-                        val topLabel = labels[0]
-                        // Only show if confidence is decent (> 70%)
-                        if (topLabel.confidence > 0.8) {
-                            currentObjectLabel = topLabel.text
-                        }
-                    }
-                    cameraImage.close() // IMPORTANT: Must close or ARCore will freeze
-                }
-                .addOnFailureListener {
-                    cameraImage.close()
-                }
-                .addOnCompleteListener {
-                    // Ensure closed even if logic fails
-                    try { cameraImage.close() } catch(e: Exception) {}
-                }
-
-        } catch (e: NotYetAvailableException) {
-            // Image not ready, skip this frame
-        } catch (e: Exception) {
-            Log.e("Eyebro", "ML Error: ${e.message}")
+            // Depth image not available yet
         }
     }
 
@@ -337,6 +296,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
     }
 
+    /**
+     * Helper View to draw the observation box on screen.
+     */
     inner class OverlayView(context: Context) : View(context) {
         private val paint = Paint().apply {
             color = Color.CYAN
@@ -350,16 +312,20 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val w = width.toFloat()
             val h = height.toFloat()
 
-            val rect = RectF(
-                w * ROI_LEFT,
-                h * ROI_TOP,
-                w * ROI_RIGHT,
-                h * ROI_BOTTOM
-            )
+            // Use the SAME configuration values as the detector
+            val left = w * ROI_LEFT
+            val right = w * ROI_RIGHT
+            val top = h * ROI_TOP
+            val bottom = h * ROI_BOTTOM
+
+            val rect = RectF(left, top, right, bottom)
             canvas.drawRect(rect, paint)
         }
     }
 
+    /**
+     * Simple renderer to handle the camera feed texture.
+     */
     class SimpleBackgroundRenderer {
         private val VERTEX_SHADER = """
             attribute vec4 a_Position;
@@ -381,8 +347,21 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             }
         """
 
-        private val QUAD_COORDS = floatArrayOf(-1.0f, -1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f, +1.0f)
-        private val QUAD_TEX_COORDS = floatArrayOf(0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f)
+        // 4 vertices, 2 floats per vertex (X, Y)
+        private val QUAD_COORDS = floatArrayOf(
+            -1.0f, -1.0f, // bottom left
+            -1.0f, +1.0f, // top left
+            +1.0f, -1.0f, // bottom right
+            +1.0f, +1.0f  // top right
+        )
+
+        // 4 vertices, 2 floats per vertex (U, V) - Standard Quad
+        private val QUAD_TEX_COORDS = floatArrayOf(
+            0.0f, 1.0f,
+            0.0f, 0.0f,
+            1.0f, 1.0f,
+            1.0f, 0.0f
+        )
 
         var textureId = -1
         private var programId = 0
@@ -390,22 +369,47 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         private var texCoordAttrib = 0
         private var textureUniform = 0
 
-        private var quadPositionBuffer: FloatBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(QUAD_COORDS); position(0) }
-        private var quadTexCoordBuffer: FloatBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(QUAD_TEX_COORDS); position(0) }
-        private var transformedTexCoordBuffer: FloatBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        private var quadPositionBuffer: FloatBuffer
+        private var quadTexCoordBuffer: FloatBuffer
+        private var transformedTexCoordBuffer: FloatBuffer
+
+        init {
+            // Initialize Position Buffer
+            quadPositionBuffer = ByteBuffer.allocateDirect(QUAD_COORDS.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+            quadPositionBuffer.put(QUAD_COORDS)
+            quadPositionBuffer.position(0)
+
+            // Initialize Standard TexCoord Buffer (Input for ARCore)
+            quadTexCoordBuffer = ByteBuffer.allocateDirect(QUAD_TEX_COORDS.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+            quadTexCoordBuffer.put(QUAD_TEX_COORDS)
+            quadTexCoordBuffer.position(0)
+
+            // Initialize Transformed TexCoord Buffer (Output from ARCore)
+            transformedTexCoordBuffer = ByteBuffer.allocateDirect(QUAD_TEX_COORDS.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+        }
 
         fun createOnGlThread() {
+            // Generate External Texture
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             textureId = textures[0]
-            GLES20.glBindTexture(36197, textureId)
-            GLES20.glTexParameteri(36197, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(36197, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(36197, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(36197, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            val textureTarget = 36197 // GL_TEXTURE_EXTERNAL_OES
+            GLES20.glBindTexture(textureTarget, textureId)
+            GLES20.glTexParameteri(textureTarget, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(textureTarget, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(textureTarget, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(textureTarget, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
 
+            // Compile Shaders
             val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
             val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
+
             programId = GLES20.glCreateProgram()
             GLES20.glAttachShader(programId, vertexShader)
             GLES20.glAttachShader(programId, fragmentShader)
@@ -418,21 +422,32 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         fun draw(frame: Frame) {
             GLES20.glUseProgram(programId)
+
+            // 1. Transform UVs using ARCore to correct for rotation/aspect ratio
             quadTexCoordBuffer.position(0)
             transformedTexCoordBuffer.position(0)
             frame.transformDisplayUvCoords(quadTexCoordBuffer, transformedTexCoordBuffer)
 
+            // 2. Set Vertex Attributes
+            // Positions (Static)
             quadPositionBuffer.position(0)
             GLES20.glVertexAttribPointer(positionAttrib, 2, GLES20.GL_FLOAT, false, 0, quadPositionBuffer)
+
+            // Texture Coords (Dynamic)
             transformedTexCoordBuffer.position(0)
             GLES20.glVertexAttribPointer(texCoordAttrib, 2, GLES20.GL_FLOAT, false, 0, transformedTexCoordBuffer)
 
             GLES20.glEnableVertexAttribArray(positionAttrib)
             GLES20.glEnableVertexAttribArray(texCoordAttrib)
+
+            // 3. Bind Texture
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(36197, textureId)
+            GLES20.glBindTexture(36197, textureId) // GL_TEXTURE_EXTERNAL_OES
             GLES20.glUniform1i(textureUniform, 0)
+
+            // 4. Draw
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
             GLES20.glDisableVertexAttribArray(positionAttrib)
             GLES20.glDisableVertexAttribArray(texCoordAttrib)
         }
