@@ -3,6 +3,10 @@ package com.example.eyebro
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Build
@@ -11,6 +15,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
@@ -43,8 +48,21 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var viewportWidth = 0
     private var viewportHeight = 0
 
+    // --- FINE TUNING: DETECTION REGION (0.0 to 1.0) ---
+    // Change these values to adjust both the visual box and the detection logic simultaneously.
+    private val ROI_LEFT = 0.15f   // Left edge at 25% screen width
+    private val ROI_RIGHT = 0.85f  // Right edge at 75% screen width
+    private val ROI_TOP = 0.25f    // Top edge at 35% screen height
+    private val ROI_BOTTOM = 0.80f // Bottom edge at 90% screen height (leaving 10% for feet)
+
+    // Drop-off detection (ground too far) only makes sense for the floor,
+    // so we only trigger it in the lower portion of the ROI.
+    private val ROI_DROP_START = 0.60f
+
     // Safety Thresholds
     private val OBSTACLE_LIMIT_MM = 1200 // Alert if object is within 1.2 meters
+    private val DROP_OFF_LIMIT_MM = 2500 // Alert if ground is deeper than 2.5 meters (Roof Edge/Stairs)
+
     private val VIBRATION_INTERVAL = 500L // Don't vibrate constantly
     private var lastVibrationTime = 0L
 
@@ -63,6 +81,13 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         surfaceView.setRenderer(this)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         surfaceView.setWillNotDraw(false)
+
+        // Add the visual overlay for the observed area
+        val overlayView = OverlayView(this)
+        addContentView(overlayView, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
 
         checkCameraPermission()
     }
@@ -167,37 +192,61 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val buffer = depthImage.planes[0].buffer.order(ByteOrder.nativeOrder())
             val width = depthImage.width
             val height = depthImage.height
+            val step = 6 // Higher step for better performance scanning
 
-            // Scan middle 25%
-            val scanWidth = width / 4
-            val scanHeight = height / 4
-            val startX = (width - scanWidth) / 2
-            val startY = (height - scanHeight) / 2
+            // Calculate active pixel area using the ROI constants
+            val startX = (width * ROI_LEFT).toInt()
+            val endX = (width * ROI_RIGHT).toInt()
+            val startY = (height * ROI_TOP).toInt()
+            val endY = (height * ROI_BOTTOM).toInt()
+
+            // Calculate where the "Drop-off" logic starts (lower part of screen)
+            val dropStartY = (height * ROI_DROP_START).toInt()
 
             var closePixels = 0
-            val step = 4
+            var deepPixels = 0
 
-            for (y in startY until startY + scanHeight step step) {
-                for (x in startX until startX + scanWidth step step) {
+            // Single loop scanning the unified Region of Interest
+            for (y in startY until endY step step) {
+                for (x in startX until endX step step) {
                     val index = (y * depthImage.planes[0].rowStride) + (x * depthImage.planes[0].pixelStride)
-                    val lowByte = buffer.get(index).toInt() and 0xFF
-                    val highByte = buffer.get(index + 1).toInt() and 0xFF
-                    val distanceMm = (highByte shl 8) or lowByte
+                    val distanceMm = getDistanceAt(buffer, index)
 
+                    // 1. Obstacle Check (Applies to the whole ROI)
+                    // If distance is valid (>0) and too close (< LIMIT)
                     if (distanceMm in 1 until OBSTACLE_LIMIT_MM) {
                         closePixels++
+                    }
+
+                    // 2. Drop-off Check (Applies only to the lower portion of ROI)
+                    // If we are looking at the floor (y > dropStartY) and it suddenly gets deep
+                    if (y >= dropStartY) {
+                        if (distanceMm > DROP_OFF_LIMIT_MM) {
+                            deepPixels++
+                        }
                     }
                 }
             }
 
             depthImage.close()
 
-            val scannedPixels = (scanWidth / step) * (scanHeight / step)
-            val threshold = scannedPixels * 0.20
+            // Calculate pixel counts to determine thresholds
+            val roiWidthPixels = (endX - startX) / step
+            val roiHeightPixels = (endY - startY) / step
+            val dropHeightPixels = (endY - dropStartY) / step
+
+            val totalPixels = roiWidthPixels * roiHeightPixels
+            val totalDropPixels = roiWidthPixels * dropHeightPixels
+
+            // Trigger thresholds (percentages of the scanned area)
+            val obsThreshold = totalPixels * 0.15 // 15% of box is blocked
+            val dropThreshold = totalDropPixels * 0.25 // 25% of floor area is deep
 
             runOnUiThread {
-                if (closePixels > threshold) {
-                    triggerObstacleWarning()
+                if (deepPixels > dropThreshold) {
+                    triggerObstacleWarning("EDGE DETECTED!", Color.RED)
+                } else if (closePixels > obsThreshold) {
+                    triggerObstacleWarning("STOP!", Color.parseColor("#FFA500")) // Orange
                 } else {
                     clearWarning()
                 }
@@ -208,9 +257,16 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
     }
 
-    private fun triggerObstacleWarning() {
+    private fun getDistanceAt(buffer: ByteBuffer, index: Int): Int {
+        val lowByte = buffer.get(index).toInt() and 0xFF
+        val highByte = buffer.get(index + 1).toInt() and 0xFF
+        return (highByte shl 8) or lowByte
+    }
+
+    private fun triggerObstacleWarning(text: String, color: Int) {
         warningText.visibility = View.VISIBLE
-        warningText.text = "STOP!"
+        warningText.text = text
+        warningText.setTextColor(color)
 
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastVibrationTime > VIBRATION_INTERVAL) {
@@ -241,8 +297,34 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     /**
+     * Helper View to draw the observation box on screen.
+     */
+    inner class OverlayView(context: Context) : View(context) {
+        private val paint = Paint().apply {
+            color = Color.CYAN
+            style = Paint.Style.STROKE
+            strokeWidth = 10f
+            isAntiAlias = true
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+
+            // Use the SAME configuration values as the detector
+            val left = w * ROI_LEFT
+            val right = w * ROI_RIGHT
+            val top = h * ROI_TOP
+            val bottom = h * ROI_BOTTOM
+
+            val rect = RectF(left, top, right, bottom)
+            canvas.drawRect(rect, paint)
+        }
+    }
+
+    /**
      * Simple renderer to handle the camera feed texture.
-     * Keeps the main class clean.
      */
     class SimpleBackgroundRenderer {
         private val VERTEX_SHADER = """
@@ -342,7 +424,6 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             GLES20.glUseProgram(programId)
 
             // 1. Transform UVs using ARCore to correct for rotation/aspect ratio
-            // We pass the clean standard UVs (quadTexCoordBuffer) and get back transformed ones.
             quadTexCoordBuffer.position(0)
             transformedTexCoordBuffer.position(0)
             frame.transformDisplayUvCoords(quadTexCoordBuffer, transformedTexCoordBuffer)
