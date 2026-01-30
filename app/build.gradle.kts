@@ -42,4 +42,6 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 
     implementation("com.google.ar:core:1.41.0")
+    implementation("com.google.mlkit:image-labeling:17.0.7")
+
 }
