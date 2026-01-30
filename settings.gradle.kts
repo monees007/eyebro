@@ -19,5 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "eyebro"
+rootProject.name = "Eyebro"
 include(":app")
+ 

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:background="@android:color/white">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Settings"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        android:textColor="@android:color/black"
+        android:layout_marginBottom="32dp"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Detection Model"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:textColor="#666666"
+        android:layout_marginBottom="8dp"/>
+
+    <RadioGroup
+        android:id="@+id/radioGroupModel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginBottom="24dp">
+
+        <RadioButton
+            android:id="@+id/rbMlKit"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Google ML Kit (Fast/Standard)"
+            android:textColor="@android:color/black"
+            android:textSize="16sp"/>
+
+        <RadioButton
+            android:id="@+id/rbYolo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="YOLOv8n (Custom/High Accuracy)"
+            android:textColor="@android:color/black"
+            android:textSize="16sp"/>
+    </RadioGroup>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#CCCCCC"
+        android:layout_marginBottom="16dp"/>
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/switchObjectDetection"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Object Identifier (AI)"
+        android:textColor="@color/black"
+        android:textSize="18sp"
+        android:checked="true"
+        android:layout_marginBottom="16dp"/>
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/switchVibration"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Haptic Feedback"
+        android:textSize="18sp"
+        android:textColor="@color/black"
+        android:checked="true"
+        android:layout_marginBottom="16dp"/>
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/switchTTS"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Voice Announcements (TTS)"
+        android:textSize="18sp"
+        android:textColor="@color/black"
+        android:checked="true"
+        android:layout_marginBottom="16dp"/>
+
+    <Button
+        android:id="@+id/btnBack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Done"
+        android:layout_marginTop="32dp"/>
+
+</LinearLayout>
