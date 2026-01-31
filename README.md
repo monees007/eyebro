@@ -10,3 +10,7 @@ For a visually impaired person, even a short walk across campus can feel uncerta
 ![IMG-20260131-WA0007](https://github.com/user-attachments/assets/2b3a0516-7949-4d14-95e8-279cd67414ca)
 
 ![IMG-20260131-WA0010](https://github.com/user-attachments/assets/608a3b34-f658-4ab0-829e-f7bd8215077c)
+
+
+![IMG-20260131-WA0025 (1)](https://github.com/user-attachments/assets/076535ea-e2a0-48e0-ac0d-b59e22afd832)
+![IMG-20260131-WA0024 (1)](https://github.com/user-attachments/assets/f2301eec-ecc8-41c4-986e-fd54c80eb6b6)
