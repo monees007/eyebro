@@ -1,6 +1,10 @@
 # eyebro
 _AI-Powered Visual Accessibility for a Smarter Campus_
 
+
+[![Download apk](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download apk")](https://github.com/monees007/eyebro/releases/download/v1.0.0/eyebro-v1.0.0.apk)
+
+
 For a visually impaired person, even a short walk across campus can feel uncertain and stressful. There might be a low-hanging branch, an unexpected step, a slippery path after rain, or a crowded corridor — things that a normal **walking stick may miss**. Because of this, many people hesitate to move around alone and often need to rely on someone else, even for simple daily tasks.
 
 **Eyebro** tries to change that feeling. It helps users “sense” obstacles through **voice** and **vibration**, giving them a little more confidence, safety, and freedom to move on their own.
