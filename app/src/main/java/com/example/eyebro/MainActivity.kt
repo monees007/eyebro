@@ -97,8 +97,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeech.O
     private var viewportHeight = 0
 
     // --- ROI & SAFETY ---
-    private val ROI_LEFT = 0.10f
-    private val ROI_RIGHT = 0.90f
+    private val ROI_LEFT = 0.15f
+    private val ROI_RIGHT = 0.85f
     private val ROI_TOP = 0.20f
     private val ROI_BOTTOM = 0.75f
     private val ROI_DROP_START = 0.60f
@@ -295,100 +295,101 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeech.O
             // Safe range: -0.35 (distinctly down) to -0.85 (steeply down)
             // > -0.35 means looking too horizontal/up (Adjusted from -0.2 to prioritize angle correction)
             // < -0.85 means looking too vertical/down at feet
-            val isAngleTooHigh = forwardY > -0.35
+            val isAngleTooHigh = forwardY > -0.40
             val isAngleTooLow = forwardY < -0.75
 
-            val depthImage = frame.acquireDepthImage16Bits()
-            if (depthImage.planes.isEmpty()) {
-                depthImage.close()
-                return
-            }
-
+            val depthImage = frame.acquireDepthImage16Bits() ?: return
             val buffer = depthImage.planes[0].buffer.order(ByteOrder.nativeOrder())
             val width = depthImage.width
             val height = depthImage.height
-            val step = 6
+            val step = 8 // Slightly increased step for performance
 
             val startX = (width * ROI_LEFT).toInt()
             val endX = (width * ROI_RIGHT).toInt()
             val startY = (height * ROI_TOP).toInt()
             val endY = (height * ROI_BOTTOM).toInt()
-            val dropStartY = (height * ROI_DROP_START).toInt()
 
             var closePixels = 0
             var deepPixels = 0
+
+            // Tracking for Stair Detection
+            var upperDepthSum = 0L
+            var lowerDepthSum = 0L
+            var upperCount = 0
+            var lowerCount = 0
+            val midY = startY + (endY - startY) / 2
 
             for (y in startY until endY step step) {
                 for (x in startX until endX step step) {
                     val index = (y * depthImage.planes[0].rowStride) + (x * depthImage.planes[0].pixelStride)
                     val distanceMm = getDistanceAt(buffer, index)
 
+                    if (distanceMm <= 0) continue
+
+                    // 1. Obstacle Detection
                     if (distanceMm in 1 until OBSTACLE_LIMIT_MM) {
                         closePixels++
                     }
-                    if (y >= dropStartY && distanceMm > DROP_OFF_LIMIT_MM) {
+
+                    // 2. Depth Gradient (for Stairs/Drop-offs)
+                    if (distanceMm > DROP_OFF_LIMIT_MM) {
                         deepPixels++
+                    }
+
+                    // 3. Collect Averages for Stair Signature
+                    if (y < midY) {
+                        upperDepthSum += distanceMm
+                        upperCount++
+                    } else {
+                        lowerDepthSum += distanceMm
+                        lowerCount++
                     }
                 }
             }
             depthImage.close()
 
+            // --- CALCULATIONS ---
             val totalPixels = ((endX - startX) / step) * ((endY - startY) / step)
-            val totalDropPixels = ((endX - startX) / step) * ((endY - dropStartY) / step)
             val obsThreshold = totalPixels * 0.15
-            // Increased threshold to 0.50 (50%) to make edge detection less sensitive to noise/false positives
-            val dropThreshold = totalDropPixels * 0.50
+            val dropThreshold = totalPixels * 0.40 // Lowered slightly to capture stairs
 
-            // --- OBJECT ID LOGIC ---
-            if (isObjDetectionEnabled && closePixels > obsThreshold) {
-                val currentTime = System.currentTimeMillis()
-                if (currentTime - lastLabelingTime > LABELING_INTERVAL_MS) {
-                    lastLabelingTime = currentTime
+            // Stair Signature: Are the "far" pixels significantly deeper than "near" pixels
+            // while both are beyond the floor range?
+            val avgUpperDepth = if (upperCount > 0) upperDepthSum / upperCount else 0
+            val avgLowerDepth = if (lowerCount > 0) lowerDepthSum / lowerCount else 0
 
-                    // --- SWITCHER LOGIC ---
-                    if (selectedModelType == "yolo") {
-                        identifyObstacleYolo(frame)
-                    } else {
-                        identifyObstacleMlKit(frame)
-                    }
-                }
-            } else if (!isObjDetectionEnabled || closePixels <= obsThreshold) {
-                if (System.currentTimeMillis() - lastLabelingTime > 2000) {
-                    currentObjectLabel = ""
-                }
-            }
+            // If the top of the frame is significantly deeper than the bottom,
+            // and we have many deep pixels, it's likely a staircase descending.
+            val isStaircase = deepPixels > dropThreshold && (avgUpperDepth > avgLowerDepth + 500)
 
-            // --- WARNING TRIGGERS (Prioritized) ---
+            // --- WARNING TRIGGERS ---
             runOnUiThread {
-                // 1. Obstacles (Close Walls/People) - Highest Priority
-                // We check this first because hitting a wall is immediate danger,
-                // even if the angle is weird.
-                if (closePixels > obsThreshold) {
-                    val labelText = if (isObjDetectionEnabled && currentObjectLabel.isNotEmpty())
-                        "STOP! ($currentObjectLabel)" else "STOP!"
-                    triggerObstacleWarning(labelText, Color.parseColor("#FFA500")) // Orange
-                }
-                // 2. Incorrect Angle (Too High/Straight)
-                // We handle this BEFORE Edge detection. If looking at horizon, 'deepPixels'
-                // will naturally be high (sky/infinity). We must suppress that false positive.
-                else if (isAngleTooHigh) {
-                    triggerObstacleWarning("Tilt Down ↘", Color.YELLOW)
-                }
-                // 3. Drop-offs (Edges) - Only valid if angle is correct
-                else if (deepPixels > dropThreshold) {
-                    triggerObstacleWarning("No Ground Ahead!", Color.RED)
-                }
-                // 4. Incorrect Angle (Too Low/Feet)
-                else if (isAngleTooLow) {
-                    triggerObstacleWarning("Tilt Up ↗", Color.YELLOW)
-                }
-                else {
-                    clearWarning()
+                when {
+                    // Priority 1: High Obstacle
+                    closePixels > obsThreshold -> {
+                        identifyObstacleMlKit(frame)
+                        val labelText = if (isObjDetectionEnabled && currentObjectLabel.isNotEmpty())
+                            "STOP! ($currentObjectLabel)" else "STOP!"
+                        triggerObstacleWarning(labelText, Color.parseColor("#FFA500"))
+                    }
+
+                    // Priority 2: Angle Correction
+                    isAngleTooHigh -> triggerObstacleWarning("Tilt Phone Down ↘", Color.YELLOW)
+
+                    // Priority 3: Stairs vs Drop-off
+                    isStaircase -> triggerObstacleWarning("Descending Stairs Ahead ⬇️", Color.CYAN)
+
+                    deepPixels > dropThreshold -> triggerObstacleWarning("Very Deep Surface Detected", Color.RED)
+
+                    // Priority 4: Low Angle
+                    isAngleTooLow -> triggerObstacleWarning("Tilt Phone Up ↗", Color.YELLOW)
+
+                    else -> clearWarning()
                 }
             }
 
         } catch (e: Exception) {
-            // Depth processing failed
+            // Log error
         }
     }
 
